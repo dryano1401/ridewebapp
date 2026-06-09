@@ -176,14 +176,65 @@ def _starting_rate_from_log_linear(t: np.ndarray, y: np.ndarray) -> float:
         return 1e-3
 
 
-def fit_tac_curve(t_min: Iterable[float], count_rate: Iterable[float]) -> FitResult:
-    """Fit a two-phase exponential model and return a terminal half-life.
+def _fit_single_exponential(
+    t: np.ndarray,
+    y: np.ndarray,
+    *,
+    base_b: float,
+    y0: float,
+    max_t: float,
+    warning: str | None = None,
+    model_name: str = "Single-exponential",
+) -> FitResult:
+    """Fit a single-exponential TAC model."""
+    try:
+        params, _ = curve_fit(
+            _single_exp_model,
+            t,
+            y,
+            p0=(y0, max(base_b, 1e-9)),
+            bounds=([0.0, 1e-12], [max(y0 * 10, 1.0), 100.0 / max_t]),
+            maxfev=50000,
+        )
+        a, b = map(float, params)
+    except Exception:
+        b = max(base_b, 1e-9)
+        a = float(np.exp(np.mean(np.log(y) + b * t)))
+        warning = "Single-exponential optimizer was unstable; used log-linear estimate." if warning is None else warning
 
-    The fitted form mirrors PK::biexp's documented model:
-    y = a1*exp(-b1*t) + a2*exp(-b2*t). The slower component is treated as the
-    terminal biological half-life, consistent with the Shiny app's use of
-    res$parms[1,2]. A single-exponential fallback is used when a stable
-    two-phase fit is not possible.
+    y_hat = _single_exp_model(t, a, b)
+    r2, rmse = _goodness_of_fit(y, y_hat)
+    half_life = LN2 / b
+    return FitResult(
+        model_name=model_name,
+        a1=a,
+        b1=b,
+        a2=0.0,
+        b2=0.0,
+        initial_half_life_min=float(half_life),
+        terminal_half_life_min=float(half_life),
+        fitted_y=y_hat,
+        r_squared=r2,
+        rmse=rmse,
+        warning=warning,
+    )
+
+
+def fit_tac_curve(
+    t_min: Iterable[float],
+    count_rate: Iterable[float],
+    model_type: str = "Bi-exponential",
+) -> FitResult:
+    """Fit the selected exponential model and return a terminal half-life.
+
+    Supported model_type values:
+    - "Bi-exponential": fits y = a1*exp(-b1*t) + a2*exp(-b2*t). The slower
+      component is treated as the terminal biological half-life.
+    - "Single-exponential": fits y = a*exp(-b*t) and uses that half-life as the
+      biological terminal half-life.
+
+    If the bi-exponential fit is selected but unstable, a single-exponential
+    fallback is used.
     """
     t = np.asarray(list(t_min), dtype=float)
     y = np.asarray(list(count_rate), dtype=float)
@@ -198,8 +249,23 @@ def fit_tac_curve(t_min: Iterable[float], count_rate: Iterable[float]) -> FitRes
     t = t[order]
     y = y[order]
 
+    model_normalized = model_type.strip().lower()
+    if model_normalized not in {"bi-exponential", "biexponential", "single-exponential", "single exponential"}:
+        raise ValueError("Model type must be 'Bi-exponential' or 'Single-exponential'.")
+
     base_b = _starting_rate_from_log_linear(t, y)
     y0 = max(float(np.max(y)), 1e-9)
+    max_t = max(float(np.max(t)), 1.0)
+
+    if model_normalized in {"single-exponential", "single exponential"}:
+        return _fit_single_exponential(
+            t,
+            y,
+            base_b=base_b,
+            y0=y0,
+            max_t=max_t,
+            model_name="Single-exponential",
+        )
 
     # Two-phase fits can be underdetermined for the default 4-point input, so use
     # several reasonable starts and select the lowest residual solution.
@@ -211,7 +277,6 @@ def fit_tac_curve(t_min: Iterable[float], count_rate: Iterable[float]) -> FitRes
     best = None
     best_sse = np.inf
     last_error: str | None = None
-    max_t = max(float(np.max(t)), 1.0)
     lower = [0.0, 1e-12, 0.0, 1e-12]
     upper = [max(y0 * 10, 1.0), 100.0 / max_t, max(y0 * 10, 1.0), 100.0 / max_t]
 
@@ -260,38 +325,17 @@ def fit_tac_curve(t_min: Iterable[float], count_rate: Iterable[float]) -> FitRes
             warning=warning,
         )
 
-    # Fallback: log-linear/single exponential fit.
-    try:
-        params, _ = curve_fit(
-            _single_exp_model,
-            t,
-            y,
-            p0=(y0, max(base_b, 1e-9)),
-            bounds=([0.0, 1e-12], [max(y0 * 10, 1.0), 100.0 / max_t]),
-            maxfev=50000,
-        )
-        a, b = map(float, params)
-    except Exception:
-        b = max(base_b, 1e-9)
-        a = float(np.exp(np.mean(np.log(y) + b * t)))
-    y_hat = _single_exp_model(t, a, b)
-    r2, rmse = _goodness_of_fit(y, y_hat)
-    half_life = LN2 / b
     fallback_warning = "Bi-exponential fit was unstable; used single-exponential fallback."
     if last_error:
         fallback_warning += f" Optimizer note: {last_error}"
-    return FitResult(
-        model_name="Single-exponential fallback",
-        a1=a,
-        b1=b,
-        a2=0.0,
-        b2=0.0,
-        initial_half_life_min=float(half_life),
-        terminal_half_life_min=float(half_life),
-        fitted_y=y_hat,
-        r_squared=r2,
-        rmse=rmse,
+    return _fit_single_exponential(
+        t,
+        y,
+        base_b=base_b,
+        y0=y0,
+        max_t=max_t,
         warning=fallback_warning,
+        model_name="Single-exponential fallback",
     )
 
 
