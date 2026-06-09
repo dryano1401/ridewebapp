@@ -134,7 +134,7 @@ def render_report_downloads(report_md: str, results_csv: bytes) -> None:
 init_state()
 
 st.title("Radiopharmaceutical Infiltration Dosimetry Estimator (RIDE)")
-st.caption("Streamlit port of the original Shiny RIDE application with improved validation, interactive plots, downloadable results, and GitHub-ready deployment files.")
+st.caption("Streamlit port of the original Shiny RIDE application with improved validation, interactive plots, selectable TAC fitting, downloadable results, and GitHub-ready deployment files.")
 
 st.warning(
     "For guidance and research/quality-improvement support only. This tool is not intended to independently diagnose, treat, or replace local clinical review."
@@ -166,6 +166,12 @@ with st.sidebar:
         format="%.2f",
     )
     tac_time_unit = st.radio("TAC time units", ["seconds", "minutes"], horizontal=True)
+    fit_model = st.radio(
+        "TAC fit model",
+        ["Bi-exponential", "Single-exponential"],
+        index=0,
+        help="Bi-exponential matches the original RIDE approach. Single-exponential directly fits one clearance component.",
+    )
 
     st.divider()
     data_source = st.radio("TAC data source", ["Edit/paste table", "Upload CSV/TSV"], horizontal=False)
@@ -234,7 +240,7 @@ with right:
         if clean_df.empty:
             st.info("Enter TAC data to view the fit and results.")
         else:
-            fit_result = fit_tac_curve(clean_df["Time_min"], clean_df["CountRate"])
+            fit_result = fit_tac_curve(clean_df["Time_min"], clean_df["CountRate"], model_type=fit_model)
             st.plotly_chart(build_fit_plot(clean_df, fit_result), use_container_width=True)
 
             fit_cols = st.columns(4)
@@ -279,6 +285,7 @@ with right:
                         "Parameter": [
                             "Isotope",
                             "Units",
+                            "Fit model",
                             "Injected activity",
                             "Measured infiltration activity",
                             "Uptake time",
@@ -289,6 +296,7 @@ with right:
                         "Value": [
                             dose_result.isotope,
                             dose_result.units,
+                            fit_result.model_name,
                             dose_result.injected_activity,
                             dose_result.infiltration_activity,
                             dose_result.uptake_time_min,
@@ -329,8 +337,11 @@ st.divider()
 with st.expander("Calculation notes"):
     st.markdown(
         """
-        The curve model follows the original app's two-phase exponential form:
-        `y = a1*exp(-b1*t) + a2*exp(-b2*t)`. The slower fitted component is used as the terminal biological half-life.
+        The selected TAC model is used to estimate the biological half-life for the dose calculation.
+
+        Bi-exponential model: `y = a1*exp(-b1*t) + a2*exp(-b2*t)`. The slower fitted component is used as the terminal biological half-life. If this fit is unstable, the app uses a single-exponential fallback.
+
+        Single-exponential model: `y = a*exp(-b*t)`. The fitted half-life is used directly as the biological terminal half-life.
 
         Effective half-life is calculated as:
         `T_eff = (T_bio × T_phys) / (T_bio + T_phys)`.
