@@ -1,7 +1,43 @@
-__pycache__/
-*.py[cod]
-.venv/
-.env
-.DS_Store
-.streamlit/secrets.toml
-.pytest_cache/
+import pandas as pd
+
+from ride_calculations import clean_tac_dataframe, fit_tac_curve, calculate_dose
+
+
+def test_default_tac_fits_and_dose_calculates():
+    raw = pd.DataFrame({"Time": [60, 1200, 2400, 4800], "CountRate": [0.99, 0.88, 0.78, 0.60]})
+    tac = clean_tac_dataframe(raw, "Time", "CountRate", "seconds")
+    fit = fit_tac_curve(tac["Time_min"], tac["CountRate"])
+    assert fit.terminal_half_life_min > 0
+    result = calculate_dose(
+        isotope="F18",
+        units="MBq",
+        injected_activity=370,
+        infiltration_activity=37,
+        uptake_time_min=60,
+        biological_terminal_half_life_min=fit.terminal_half_life_min,
+    )
+    assert result.curve_absorbed_dose_gy > 0
+    assert result.physical_absorbed_dose_gy > 0
+
+from ride_report import build_markdown_report, markdown_to_plain_text
+
+
+def test_report_generation_contains_expected_sections():
+    raw = pd.DataFrame({"Time": [60, 1200, 2400, 4800], "CountRate": [0.99, 0.88, 0.78, 0.60]})
+    tac = clean_tac_dataframe(raw, "Time", "CountRate", "seconds")
+    fit = fit_tac_curve(tac["Time_min"], tac["CountRate"])
+    result = calculate_dose(
+        isotope="F18",
+        units="MBq",
+        injected_activity=370,
+        infiltration_activity=37,
+        uptake_time_min=60,
+        biological_terminal_half_life_min=fit.terminal_half_life_min,
+    )
+    report = build_markdown_report(dose=result, fit=fit, tac_df=tac, source_label="manual table entry")
+    assert "RIDE Dosimetry Narrative Report" in report
+    assert "Dose estimate summary" in report
+    assert "F18" in report
+    assert "Gy" in report
+    assert "TAC data used for fitting" in report
+    assert "RIDE DOSIMETRY NARRATIVE REPORT" in markdown_to_plain_text(report)
