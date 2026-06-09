@@ -20,6 +20,9 @@ from ride_calculations import (
 from ride_report import build_markdown_report, markdown_to_plain_text
 
 
+DISPLAY_DIGITS = 2
+
+
 st.set_page_config(
     page_title="RIDE | Radiopharmaceutical Infiltration Dosimetry Estimator",
     page_icon="☢️",
@@ -29,7 +32,7 @@ st.set_page_config(
 
 DEFAULT_TAC = pd.DataFrame(
     {
-        "Time": [60, 1200, 2400, 4800],
+        "Time": [60.00, 1200.00, 2400.00, 4800.00],
         "CountRate": [0.99, 0.88, 0.78, 0.60],
     }
 )
@@ -58,6 +61,12 @@ def read_uploaded_table(uploaded_file, sep: str) -> pd.DataFrame:
     return pd.read_csv(uploaded_file, sep=sep)
 
 
+def format_float(value: float | None, digits: int = DISPLAY_DIGITS) -> str:
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "—"
+    return f"{value:,.{digits}f}"
+
+
 def build_fit_plot(clean_df: pd.DataFrame, fit_result) -> go.Figure:
     t = clean_df["Time_min"].to_numpy(dtype=float)
     y = clean_df["CountRate"].to_numpy(dtype=float)
@@ -75,7 +84,7 @@ def build_fit_plot(clean_df: pd.DataFrame, fit_result) -> go.Figure:
             mode="markers",
             name="Observed TAC",
             marker={"size": 10},
-            hovertemplate="Time: %{x:.2f} min<br>Count rate: %{y:.4g}<extra></extra>",
+            hovertemplate="Time: %{x:.2f} min<br>Count rate: %{y:.2f}<extra></extra>",
         )
     )
     fig.add_trace(
@@ -84,7 +93,7 @@ def build_fit_plot(clean_df: pd.DataFrame, fit_result) -> go.Figure:
             y=y_grid,
             mode="lines",
             name=f"{fit_result.model_name} fit",
-            hovertemplate="Time: %{x:.2f} min<br>Predicted: %{y:.4g}<extra></extra>",
+            hovertemplate="Time: %{x:.2f} min<br>Predicted: %{y:.2f}<extra></extra>",
         )
     )
     fig.update_layout(
@@ -93,13 +102,9 @@ def build_fit_plot(clean_df: pd.DataFrame, fit_result) -> go.Figure:
         hovermode="x unified",
         margin={"l": 10, "r": 10, "t": 40, "b": 10},
     )
+    fig.update_xaxes(tickformat=".2f")
+    fig.update_yaxes(tickformat=".2f")
     return fig
-
-
-def format_float(value: float | None, digits: int = 2) -> str:
-    if value is None or (isinstance(value, float) and not math.isfinite(value)):
-        return "—"
-    return f"{value:,.{digits}f}"
 
 
 def render_report_downloads(report_md: str, results_csv: bytes) -> None:
@@ -108,15 +113,8 @@ def render_report_downloads(report_md: str, results_csv: bytes) -> None:
         "The report converts the fitted TAC and dose calculations into a concise textual summary that can be copied into a note, QA record, or research worksheet."
     )
     st.text_area("Generated report", report_md, height=420)
-    d1, d2, d3 = st.columns(3)
+    d1, d2 = st.columns(2)
     d1.download_button(
-        "Download report Markdown",
-        data=report_md.encode("utf-8"),
-        file_name="ride_dosimetry_report.md",
-        mime="text/markdown",
-        use_container_width=True,
-    )
-    d2.download_button(
         "Download report TXT",
         data=markdown_to_plain_text(report_md).encode("utf-8"),
         file_name="ride_dosimetry_report.txt",
@@ -124,7 +122,7 @@ def render_report_downloads(report_md: str, results_csv: bytes) -> None:
         use_container_width=True,
     )
     if results_csv:
-        d3.download_button(
+        d2.download_button(
             "Download results CSV",
             data=results_csv,
             file_name="ride_dosimetry_results.csv",
@@ -146,9 +144,27 @@ with st.sidebar:
     st.header("Case inputs")
     isotope = st.selectbox("Isotope", ISOTOPE_DATA["Isotope"].tolist(), index=2)
     units = st.radio("Activity units", ["MBq", "mCi"], horizontal=True)
-    injected_activity = st.number_input("Injected activity", min_value=0.0, value=370.0 if units == "MBq" else 10.0, step=1.0)
-    infiltration_activity = st.number_input("Measured infiltration activity", min_value=0.0, value=37.0 if units == "MBq" else 1.0, step=0.1)
-    uptake_time_min = st.number_input("Uptake time between injection and image (min)", min_value=0.0, value=60.0, step=1.0)
+    injected_activity = st.number_input(
+        "Injected activity",
+        min_value=0.0,
+        value=370.00 if units == "MBq" else 10.00,
+        step=1.00,
+        format="%.2f",
+    )
+    infiltration_activity = st.number_input(
+        "Measured infiltration activity",
+        min_value=0.0,
+        value=37.00 if units == "MBq" else 1.00,
+        step=0.10,
+        format="%.2f",
+    )
+    uptake_time_min = st.number_input(
+        "Uptake time between injection and image (min)",
+        min_value=0.0,
+        value=60.00,
+        step=1.00,
+        format="%.2f",
+    )
     tac_time_unit = st.radio("TAC time units", ["seconds", "minutes"], horizontal=True)
 
     st.divider()
@@ -175,8 +191,8 @@ with left:
             use_container_width=True,
             key="tac_editor_widget",
             column_config={
-                "Time": st.column_config.NumberColumn("Time", help="Seconds or minutes based on the sidebar selection."),
-                "CountRate": st.column_config.NumberColumn("Count rate", min_value=0.0),
+                "Time": st.column_config.NumberColumn("Time", help="Seconds or minutes based on the sidebar selection.", format="%.2f"),
+                "CountRate": st.column_config.NumberColumn("Count rate", min_value=0.0, format="%.2f"),
             },
         )
         st.session_state.tac_editor = raw_df
@@ -200,7 +216,10 @@ with left:
             st.info("Upload a CSV/TSV file or switch to the editable table.")
 
     with st.expander("Isotope conversion table"):
-        st.dataframe(ISOTOPE_DATA, use_container_width=True, hide_index=True)
+        isotope_display = ISOTOPE_DATA.copy()
+        numeric_cols = isotope_display.select_dtypes(include="number").columns
+        isotope_display[numeric_cols] = isotope_display[numeric_cols].round(DISPLAY_DIGITS)
+        st.dataframe(isotope_display, use_container_width=True, hide_index=True)
 
 with right:
     st.subheader("Curve fit and dose summary")
@@ -220,9 +239,9 @@ with right:
 
             fit_cols = st.columns(4)
             fit_cols[0].metric("Model", fit_result.model_name)
-            fit_cols[1].metric("Terminal biological HL", f"{fit_result.terminal_half_life_min:,.1f} min")
-            fit_cols[2].metric("R²", f"{fit_result.r_squared:.3f}" if math.isfinite(fit_result.r_squared) else "—")
-            fit_cols[3].metric("RMSE", f"{fit_result.rmse:.4g}")
+            fit_cols[1].metric("Terminal biological HL", f"{fit_result.terminal_half_life_min:,.2f} min")
+            fit_cols[2].metric("R²", f"{fit_result.r_squared:.2f}" if math.isfinite(fit_result.r_squared) else "—")
+            fit_cols[3].metric("RMSE", f"{fit_result.rmse:.2f}")
 
             if fit_result.warning:
                 st.info(fit_result.warning)
@@ -252,7 +271,7 @@ with right:
                     results_df,
                     use_container_width=True,
                     hide_index=True,
-                    column_config={"Value": st.column_config.NumberColumn(format="%.4f")},
+                    column_config={"Value": st.column_config.NumberColumn(format="%.2f")},
                 )
 
                 details = pd.DataFrame(
@@ -288,7 +307,7 @@ with right:
                     ignore_index=True,
                     sort=False,
                 )
-                csv_bytes = export.to_csv(index=False).encode("utf-8")
+                csv_bytes = export.to_csv(index=False, float_format="%.2f").encode("utf-8")
                 source_label = "manual table entry" if data_source == "Edit/paste table" else "uploaded file"
                 report_md = build_markdown_report(
                     dose=dose_result,
