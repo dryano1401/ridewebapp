@@ -10,8 +10,11 @@ import pandas as pd
 from ride_calculations import DoseResult, FitResult
 
 
-def _fmt(value: float | None, digits: int = 2, suffix: str = "") -> str:
-    """Format numeric values for a readable report."""
+REPORT_DIGITS = 2
+
+
+def _fmt(value: float | None, digits: int = REPORT_DIGITS, suffix: str = "") -> str:
+    """Format numeric values for a readable report using two decimal places."""
     if value is None:
         return "not available"
     try:
@@ -29,7 +32,7 @@ def _relative_to_curve(value: float | None, curve_value: float | None) -> str:
         return "not available"
     change = (float(value) - float(curve_value)) / float(curve_value) * 100.0
     direction = "higher" if change >= 0 else "lower"
-    return f"{abs(change):.1f}% {direction} than curve-based"
+    return f"{abs(change):.2f}% {direction} than curve-based"
 
 
 def _quality_statement(fit: FitResult, n_points: int) -> str:
@@ -63,8 +66,8 @@ def _tac_summary(tac_df: pd.DataFrame) -> tuple[int, str, str]:
 
     time_min = tac_df["Time_min"]
     count_rate = tac_df["CountRate"]
-    time_range = f"{_fmt(float(time_min.min()), 2)}-{_fmt(float(time_min.max()), 2)} min"
-    count_range = f"{_fmt(float(count_rate.min()), 4)}-{_fmt(float(count_rate.max()), 4)}"
+    time_range = f"{_fmt(float(time_min.min()))}-{_fmt(float(time_min.max()))} min"
+    count_range = f"{_fmt(float(count_rate.min()))}-{_fmt(float(count_rate.max()))}"
     return n_points, time_range, count_range
 
 
@@ -75,7 +78,7 @@ def _tac_lines(tac_df: pd.DataFrame) -> list[str]:
     lines = ["TAC points used for fitting:"]
     for _, row in tac_df[["Time_min", "CountRate"]].iterrows():
         lines.append(
-            f"  - {_fmt(row['Time_min'], 2)} min: {_fmt(row['CountRate'], 4)} relative count rate"
+            f"  - {_fmt(row['Time_min'])} min: {_fmt(row['CountRate'])} relative count rate"
         )
     return lines
 
@@ -106,9 +109,9 @@ def build_markdown_report(
         "Summary",
         (
             f"{dose.isotope} infiltration estimate using injected activity "
-            f"{_fmt(dose.injected_activity, 3)} {dose.units} and measured infiltration "
-            f"activity {_fmt(dose.infiltration_activity, 3)} {dose.units} at "
-            f"{_fmt(dose.uptake_time_min, 1)} min post-administration."
+            f"{_fmt(dose.injected_activity)} {dose.units} and measured infiltration "
+            f"activity {_fmt(dose.infiltration_activity)} {dose.units} at "
+            f"{_fmt(dose.uptake_time_min)} min post-administration."
         ),
         (
             f"TAC source: {source_label}; {n_points} usable points; "
@@ -118,26 +121,26 @@ def build_markdown_report(
         "Model and half-life",
         (
             f"Fit model: {fit.model_name}; terminal biological half-life "
-            f"{_fmt(fit.terminal_half_life_min, 2)} min; physical half-life "
-            f"{_fmt(dose.physical_half_life_min, 2)} min; effective half-life "
-            f"{_fmt(dose.effective_half_life_min, 2)} min."
+            f"{_fmt(fit.terminal_half_life_min)} min; physical half-life "
+            f"{_fmt(dose.physical_half_life_min)} min; effective half-life "
+            f"{_fmt(dose.effective_half_life_min)} min."
         ),
         (
-            f"Fit quality: R2 {_fmt(fit.r_squared, 3)}, RMSE {_fmt(fit.rmse, 4)} "
+            f"Fit quality: R2 {_fmt(fit.r_squared)}, RMSE {_fmt(fit.rmse)} "
             f"({_quality_statement(fit, n_points)})."
         ),
         "",
         "Dose estimates",
-        f"Curve-based absorbed dose: {_fmt(dose.curve_absorbed_dose_gy, 2)} Gy.",
+        f"Curve-based absorbed dose: {_fmt(dose.curve_absorbed_dose_gy)} Gy.",
         (
-            f"Physical-decay-only absorbed dose: {_fmt(dose.physical_absorbed_dose_gy, 2)} Gy "
+            f"Physical-decay-only absorbed dose: {_fmt(dose.physical_absorbed_dose_gy)} Gy "
             f"({_relative_to_curve(dose.physical_absorbed_dose_gy, dose.curve_absorbed_dose_gy)})."
         ),
     ]
 
     if dose.complete_absorbed_dose_gy is not None:
         lines.append(
-            f"Complete-infiltration comparison dose: {_fmt(dose.complete_absorbed_dose_gy, 2)} Gy "
+            f"Complete-infiltration comparison dose: {_fmt(dose.complete_absorbed_dose_gy)} Gy "
             f"({_relative_to_curve(dose.complete_absorbed_dose_gy, dose.curve_absorbed_dose_gy)})."
         )
     else:
@@ -147,11 +150,11 @@ def build_markdown_report(
         [
             (
                 f"Curve-corrected initial infiltrated activity: "
-                f"{_fmt(dose.curve_initial_activity, 3)} {dose.units}."
+                f"{_fmt(dose.curve_initial_activity)} {dose.units}."
             ),
             (
-                f"Correction factors: effective {_fmt(dose.effective_correction_factor, 4)}, "
-                f"physical {_fmt(dose.physical_correction_factor, 4)}."
+                f"Correction factors: effective {_fmt(dose.effective_correction_factor)}, "
+                f"physical {_fmt(dose.physical_correction_factor)}."
             ),
             "",
             "Automated checks",
