@@ -1,150 +1,321 @@
-"""Narrative report generation for the RIDE Streamlit application."""
-
 from __future__ import annotations
 
-from datetime import datetime
+from io import StringIO
 import math
-from typing import Iterable
 
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 
-from ride_calculations import DoseResult, FitResult
-
-
-def _fmt(value: float | None, digits: int = 2, suffix: str = "") -> str:
-    if value is None:
-        return "not available"
-    try:
-        if not math.isfinite(float(value)):
-            return "not available"
-    except (TypeError, ValueError):
-        return "not available"
-    return f"{float(value):,.{digits}f}{suffix}"
-
-
-def _pct_change(numerator: float | None, denominator: float | None) -> str:
-    if numerator is None or denominator is None or denominator == 0:
-        return "not available"
-    return _fmt((numerator - denominator) / denominator * 100.0, 1, "%")
+from ride_calculations import (
+    ISOTOPE_DATA,
+    calculate_dose,
+    clean_tac_dataframe,
+    dose_result_to_dataframe,
+    fit_tac_curve,
+    _biexp_model,
+    _single_exp_model,
+)
+from ride_report import build_markdown_report, markdown_to_plain_text
 
 
-def _quality_statement(fit: FitResult, n_points: int) -> str:
-    if n_points < 4:
-        return (
-            "The TAC contains fewer than four usable points, so the two-phase fit may be poorly constrained. "
-            "Additional time points should be considered if the result will be used for formal reporting."
-        )
-    if math.isfinite(fit.r_squared) and fit.r_squared >= 0.95:
-        return "The fitted model closely followed the entered TAC data based on the reported R²."
-    if math.isfinite(fit.r_squared) and fit.r_squared >= 0.85:
-        return "The fitted model showed reasonable agreement with the entered TAC data, but visual review of the plot is recommended."
-    if math.isfinite(fit.r_squared):
-        return "The fitted model showed limited agreement with the entered TAC data; review the input points and fitted curve before relying on the estimate."
-    return "Fit quality could not be summarized by R² for this dataset. Visual review of the fitted curve is recommended."
+st.set_page_config(
+    page_title="RIDE | Radiopharmaceutical Infiltration Dosimetry Estimator",
+    page_icon="☢️",
+    layout="wide",
+)
 
 
-def _dose_statement(dose: DoseResult) -> str:
-    pieces: list[str] = []
-    pieces.append(
-        "The curve-based absorbed dose estimate was "
-        f"{_fmt(dose.curve_absorbed_dose_gy, 2, ' Gy')}."
-    )
-    pieces.append(
-        "The physical-decay-only estimate was "
-        f"{_fmt(dose.physical_absorbed_dose_gy, 2, ' Gy')}, which is "
-        f"{_pct_change(dose.physical_absorbed_dose_gy, dose.curve_absorbed_dose_gy)} relative to the curve-based estimate."
-    )
-    if dose.complete_absorbed_dose_gy is not None:
-        pieces.append(
-            "The complete-infiltration comparison estimate was "
-            f"{_fmt(dose.complete_absorbed_dose_gy, 2, ' Gy')}."
-        )
+DEFAULT_TAC = pd.DataFrame(
+    {
+        "Time": [60, 1200, 2400, 4800],
+        "CountRate": [0.99, 0.88, 0.78, 0.60],
+    }
+)
+
+
+def init_state() -> None:
+    if "tac_editor" not in st.session_state:
+        st.session_state.tac_editor = DEFAULT_TAC.copy()
+    if "last_report_md" not in st.session_state:
+        st.session_state.last_report_md = ""
+    if "last_results_csv" not in st.session_state:
+        st.session_state.last_results_csv = b""
+
+
+def reset_app() -> None:
+    st.session_state.tac_editor = DEFAULT_TAC.copy()
+    for key in ["uploaded_df", "tac_editor_widget"]:
+        st.session_state.pop(key, None)
+    st.session_state.last_report_md = ""
+    st.session_state.last_results_csv = b""
+
+
+def read_uploaded_table(uploaded_file, sep: str) -> pd.DataFrame:
+    if uploaded_file is None:
+        return pd.DataFrame()
+    return pd.read_csv(uploaded_file, sep=sep)
+
+
+def build_fit_plot(clean_df: pd.DataFrame, fit_result) -> go.Figure:
+    t = clean_df["Time_min"].to_numpy(dtype=float)
+    y = clean_df["CountRate"].to_numpy(dtype=float)
+    t_grid = np.linspace(0, max(float(t.max()), 1.0), 250)
+    if fit_result.model_name.startswith("Bi"):
+        y_grid = _biexp_model(t_grid, fit_result.a1, fit_result.b1, fit_result.a2, fit_result.b2)
     else:
-        pieces.append("The complete-infiltration comparison estimate was not available for this input combination.")
-    if dose.complete_infiltration_flag:
-        pieces.append(
-            "The curve-corrected initial infiltrated activity exceeded the injected activity, so the curve-based activity was capped at the injected activity."
+        y_grid = _single_exp_model(t_grid, fit_result.a1, fit_result.b1)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=t,
+            y=y,
+            mode="markers",
+            name="Observed TAC",
+            marker={"size": 10},
+            hovertemplate="Time: %{x:.2f} min<br>Count rate: %{y:.4g}<extra></extra>",
         )
-    return " ".join(pieces)
-
-
-def build_markdown_report(
-    *,
-    dose: DoseResult,
-    fit: FitResult,
-    tac_df: pd.DataFrame,
-    source_label: str,
-    app_version: str = "RIDE Streamlit",
-) -> str:
-    """Build a clinician-readable Markdown summary from app results."""
-    n_points = len(tac_df)
-    time_min = tac_df["Time_min"] if "Time_min" in tac_df else pd.Series(dtype=float)
-    count_rate = tac_df["CountRate"] if "CountRate" in tac_df else pd.Series(dtype=float)
-    time_range = (
-        f"{_fmt(float(time_min.min()), 2)} to {_fmt(float(time_min.max()), 2)} min" if not time_min.empty else "not available"
     )
-    count_range = (
-        f"{_fmt(float(count_rate.min()), 4)} to {_fmt(float(count_rate.max()), 4)}" if not count_rate.empty else "not available"
+    fig.add_trace(
+        go.Scatter(
+            x=t_grid,
+            y=y_grid,
+            mode="lines",
+            name=f"{fit_result.model_name} fit",
+            hovertemplate="Time: %{x:.2f} min<br>Predicted: %{y:.4g}<extra></extra>",
+        )
     )
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    warnings: list[str] = []
-    if fit.warning:
-        warnings.append(fit.warning)
-    if dose.warning:
-        warnings.append(dose.warning)
-    if dose.complete_infiltration_flag:
-        warnings.append("Possible complete infiltration flag was triggered.")
-    warnings_text = "\n".join(f"- {item}" for item in warnings) if warnings else "- No automated warnings were generated."
-
-    tac_table = tac_df[["Time_min", "CountRate"]].rename(
-        columns={"Time_min": "Time after imaging start (min)", "CountRate": "Relative count rate"}
+    fig.update_layout(
+        xaxis_title="Time after measurement start (min)",
+        yaxis_title="Relative count rate",
+        hovermode="x unified",
+        margin={"l": 10, "r": 10, "t": 40, "b": 10},
     )
-    tac_table_md = tac_table.to_markdown(index=False, floatfmt=".4f") if not tac_table.empty else "No TAC data available."
-
-    report = f"""# RIDE Dosimetry Narrative Report
-
-Generated: {now}  
-Application: {app_version}
-
-## Case summary
-
-A radiopharmaceutical infiltration dosimetry estimate was generated for **{dose.isotope}** using an injected activity of **{_fmt(dose.injected_activity, 3)} {dose.units}** and a measured infiltration activity of **{_fmt(dose.infiltration_activity, 3)} {dose.units}** at **{_fmt(dose.uptake_time_min, 1)} minutes** after administration. The source TAC data were entered by **{source_label}** and included **{n_points} usable time points** spanning **{time_range}**. Relative count rates ranged from **{count_range}**.
-
-## TAC model summary
-
-The entered time-activity data were fit using a **{fit.model_name}** model. The terminal biological half-life estimated from the fitted clearance curve was **{_fmt(fit.terminal_half_life_min, 2)} minutes**. The isotope physical half-life used in the calculation was **{_fmt(dose.physical_half_life_min, 2)} minutes**, producing an effective half-life of **{_fmt(dose.effective_half_life_min, 2)} minutes**. Fit quality metrics were R² = **{_fmt(fit.r_squared, 3)}** and RMSE = **{_fmt(fit.rmse, 4)}**. {_quality_statement(fit, n_points)}
-
-## Dose estimate summary
-
-{_dose_statement(dose)} The curve-corrected initial infiltrated activity was **{_fmt(dose.curve_initial_activity, 3)} {dose.units}**. The effective correction factor was **{_fmt(dose.effective_correction_factor, 4)}**, and the physical-decay correction factor was **{_fmt(dose.physical_correction_factor, 4)}**.
-
-## Automated checks and warnings
-
-{warnings_text}
-
-## TAC data used for fitting
-
-{tac_table_md}
-
-## Interpretation note
-
-This report is an automated summary of the entered data and fitted model output. It should be reviewed alongside the TAC plot, original images/count measurements, local infiltration assessment, and institutional clinical judgment. The tool is intended for guidance, research, and quality-improvement support and is not a standalone diagnostic or treatment decision system.
-"""
-    return report.strip() + "\n"
+    return fig
 
 
-def markdown_to_plain_text(markdown_report: str) -> str:
-    """A small Markdown-to-text helper for downloadable TXT reports."""
-    lines: list[str] = []
-    for line in markdown_report.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            lines.append(stripped[2:].upper())
-        elif stripped.startswith("## "):
-            lines.append("\n" + stripped[3:].upper())
-        elif stripped.startswith("- "):
-            lines.append(stripped)
+def format_float(value: float | None, digits: int = 2) -> str:
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "—"
+    return f"{value:,.{digits}f}"
+
+
+def render_report_downloads(report_md: str, results_csv: bytes) -> None:
+    st.markdown("### Narrative report")
+    st.write(
+        "The report converts the fitted TAC and dose calculations into a concise textual summary that can be copied into a note, QA record, or research worksheet."
+    )
+    st.text_area("Generated report", report_md, height=420)
+    d1, d2, d3 = st.columns(3)
+    d1.download_button(
+        "Download report Markdown",
+        data=report_md.encode("utf-8"),
+        file_name="ride_dosimetry_report.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+    d2.download_button(
+        "Download report TXT",
+        data=markdown_to_plain_text(report_md).encode("utf-8"),
+        file_name="ride_dosimetry_report.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+    if results_csv:
+        d3.download_button(
+            "Download results CSV",
+            data=results_csv,
+            file_name="ride_dosimetry_results.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
+init_state()
+
+st.title("Radiopharmaceutical Infiltration Dosimetry Estimator (RIDE)")
+st.caption("Streamlit port of the original Shiny RIDE application with improved validation, interactive plots, downloadable results, and GitHub-ready deployment files.")
+
+st.warning(
+    "For guidance and research/quality-improvement support only. This tool is not intended to independently diagnose, treat, or replace local clinical review."
+)
+
+with st.sidebar:
+    st.header("Case inputs")
+    isotope = st.selectbox("Isotope", ISOTOPE_DATA["Isotope"].tolist(), index=2)
+    units = st.radio("Activity units", ["MBq", "mCi"], horizontal=True)
+    injected_activity = st.number_input("Injected activity", min_value=0.0, value=370.0 if units == "MBq" else 10.0, step=1.0)
+    infiltration_activity = st.number_input("Measured infiltration activity", min_value=0.0, value=37.0 if units == "MBq" else 1.0, step=0.1)
+    uptake_time_min = st.number_input("Uptake time between injection and image (min)", min_value=0.0, value=60.0, step=1.0)
+    tac_time_unit = st.radio("TAC time units", ["seconds", "minutes"], horizontal=True)
+
+    st.divider()
+    data_source = st.radio("TAC data source", ["Edit/paste table", "Upload CSV/TSV"], horizontal=False)
+    calculate = st.button("Calculate results", type="primary", use_container_width=True)
+    show_prior_report = st.checkbox("Keep last report visible", value=True, help="Keeps the most recent narrative report available after download button clicks or minor UI refreshes.")
+    st.button("Reset example data", use_container_width=True, on_click=reset_app)
+
+left, right = st.columns([0.42, 0.58], vertical_alignment="top")
+
+with left:
+    st.subheader("TAC data")
+    st.write("Enter two columns: time and relative count rate. Count rates must be positive.")
+
+    raw_df = pd.DataFrame()
+    time_col = "Time"
+    count_col = "CountRate"
+    sep = ","
+
+    if data_source == "Edit/paste table":
+        raw_df = st.data_editor(
+            st.session_state.tac_editor,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="tac_editor_widget",
+            column_config={
+                "Time": st.column_config.NumberColumn("Time", help="Seconds or minutes based on the sidebar selection."),
+                "CountRate": st.column_config.NumberColumn("Count rate", min_value=0.0),
+            },
+        )
+        st.session_state.tac_editor = raw_df
+        time_col, count_col = "Time", "CountRate"
+    else:
+        uploaded_file = st.file_uploader("Upload TAC file", type=["csv", "tsv", "txt"])
+        sep_label = st.selectbox("Delimiter", ["Comma", "Tab", "Semicolon"], index=0)
+        sep = {"Comma": ",", "Tab": "\t", "Semicolon": ";"}[sep_label]
+        try:
+            raw_df = read_uploaded_table(uploaded_file, sep)
+        except Exception as exc:
+            st.error(f"Could not read the uploaded file: {exc}")
+            raw_df = pd.DataFrame()
+
+        if not raw_df.empty:
+            st.dataframe(raw_df.head(20), use_container_width=True)
+            cols = list(raw_df.columns)
+            time_col = st.selectbox("Time column", cols, index=0)
+            count_col = st.selectbox("Count-rate column", cols, index=1 if len(cols) > 1 else 0)
         else:
-            lines.append(line.replace("**", ""))
-    return "\n".join(lines).strip() + "\n"
+            st.info("Upload a CSV/TSV file or switch to the editable table.")
+
+    with st.expander("Isotope conversion table"):
+        st.dataframe(ISOTOPE_DATA, use_container_width=True, hide_index=True)
+
+with right:
+    st.subheader("Curve fit and dose summary")
+
+    clean_df = pd.DataFrame()
+    fit_result = None
+    dose_result = None
+
+    try:
+        if not raw_df.empty:
+            clean_df = clean_tac_dataframe(raw_df, time_col, count_col, tac_time_unit)
+        if clean_df.empty:
+            st.info("Enter TAC data to view the fit and results.")
+        else:
+            fit_result = fit_tac_curve(clean_df["Time_min"], clean_df["CountRate"])
+            st.plotly_chart(build_fit_plot(clean_df, fit_result), use_container_width=True)
+
+            fit_cols = st.columns(4)
+            fit_cols[0].metric("Model", fit_result.model_name)
+            fit_cols[1].metric("Terminal biological HL", f"{fit_result.terminal_half_life_min:,.1f} min")
+            fit_cols[2].metric("R²", f"{fit_result.r_squared:.3f}" if math.isfinite(fit_result.r_squared) else "—")
+            fit_cols[3].metric("RMSE", f"{fit_result.rmse:.4g}")
+
+            if fit_result.warning:
+                st.info(fit_result.warning)
+
+            if calculate:
+                dose_result = calculate_dose(
+                    isotope=isotope,
+                    units=units,
+                    injected_activity=injected_activity,
+                    infiltration_activity=infiltration_activity,
+                    uptake_time_min=uptake_time_min,
+                    biological_terminal_half_life_min=fit_result.terminal_half_life_min,
+                )
+
+                if dose_result.warning:
+                    st.warning(dose_result.warning)
+                if dose_result.complete_infiltration_flag:
+                    st.error("Possible complete infiltration: curve-corrected activity exceeded injected activity.")
+
+                r1, r2, r3 = st.columns(3)
+                r1.metric("Curve-based dose", f"{dose_result.curve_absorbed_dose_gy:,.2f} Gy")
+                r2.metric("Complete-infiltration comparison", f"{format_float(dose_result.complete_absorbed_dose_gy)} Gy")
+                r3.metric("Physical-decay-only dose", f"{dose_result.physical_absorbed_dose_gy:,.2f} Gy")
+
+                results_df = dose_result_to_dataframe(dose_result)
+                st.dataframe(
+                    results_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"Value": st.column_config.NumberColumn(format="%.4f")},
+                )
+
+                details = pd.DataFrame(
+                    {
+                        "Parameter": [
+                            "Isotope",
+                            "Units",
+                            "Injected activity",
+                            "Measured infiltration activity",
+                            "Uptake time",
+                            "Dose-rate factor used",
+                            "Effective correction factor",
+                            "Physical correction factor",
+                        ],
+                        "Value": [
+                            dose_result.isotope,
+                            dose_result.units,
+                            dose_result.injected_activity,
+                            dose_result.infiltration_activity,
+                            dose_result.uptake_time_min,
+                            dose_result.dose_rate_factor_used,
+                            dose_result.effective_correction_factor,
+                            dose_result.physical_correction_factor,
+                        ],
+                    }
+                )
+
+                export = pd.concat(
+                    [
+                        results_df.assign(Section="Results"),
+                        details.rename(columns={"Parameter": "Metric"}).assign(Units="", Section="Inputs"),
+                    ],
+                    ignore_index=True,
+                    sort=False,
+                )
+                csv_bytes = export.to_csv(index=False).encode("utf-8")
+                source_label = "manual table entry" if data_source == "Edit/paste table" else "uploaded file"
+                report_md = build_markdown_report(
+                    dose=dose_result,
+                    fit=fit_result,
+                    tac_df=clean_df,
+                    source_label=source_label,
+                )
+                st.session_state.last_report_md = report_md
+                st.session_state.last_results_csv = csv_bytes
+                render_report_downloads(report_md, csv_bytes)
+            else:
+                st.info("Review the fit, then select **Calculate results** in the sidebar.")
+                if show_prior_report and st.session_state.last_report_md:
+                    render_report_downloads(st.session_state.last_report_md, st.session_state.last_results_csv)
+    except Exception as exc:
+        st.error(str(exc))
+
+st.divider()
+with st.expander("Calculation notes"):
+    st.markdown(
+        """
+        The curve model follows the original app's two-phase exponential form:
+        `y = a1*exp(-b1*t) + a2*exp(-b2*t)`. The slower fitted component is used as the terminal biological half-life.
+
+        Effective half-life is calculated as:
+        `T_eff = (T_bio × T_phys) / (T_bio + T_phys)`.
+
+        The app reports three estimates: curve-based, complete-infiltration comparison, and physical-decay-only. Inputs and outputs retain the same activity units selected in the sidebar, while absorbed dose is reported in Gy.
+        """
+    )
